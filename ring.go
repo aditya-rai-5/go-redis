@@ -129,14 +129,15 @@ type RingOptions struct {
 	// PoolFIFO uses FIFO mode for each node connection pool GET/PUT (default LIFO).
 	PoolFIFO bool
 
-	PoolSize              int
-	PoolTimeout           time.Duration
-	MinIdleConns          int
-	MaxIdleConns          int
-	MaxActiveConns        int
-	ConnMaxIdleTime       time.Duration
-	ConnMaxLifetime       time.Duration
-	ConnMaxLifetimeJitter time.Duration
+	PoolSize                    int
+	PoolTimeout                 time.Duration
+	MinIdleConns                int
+	MaxIdleConns                int
+	MaxActiveConns              int
+	ConnMaxIdleTime             time.Duration
+	ConnMaxLifetime             time.Duration
+	ConnMaxLifetimeJitter       time.Duration
+	ConnMaxLifetimeReapInterval time.Duration
 
 	// ReadBufferSize is the size of the bufio.Reader buffer for each connection.
 	// Larger buffers can improve performance for commands that return large responses.
@@ -264,17 +265,18 @@ func (opt *RingOptions) clientOptions() *Options {
 		DrainOnContextTimeout:      opt.DrainOnContextTimeout,
 		ContextTimeoutDrainTimeout: opt.ContextTimeoutDrainTimeout,
 
-		PoolFIFO:              opt.PoolFIFO,
-		PoolSize:              opt.PoolSize,
-		PoolTimeout:           opt.PoolTimeout,
-		MinIdleConns:          opt.MinIdleConns,
-		MaxIdleConns:          opt.MaxIdleConns,
-		MaxActiveConns:        opt.MaxActiveConns,
-		ConnMaxIdleTime:       opt.ConnMaxIdleTime,
-		ConnMaxLifetime:       opt.ConnMaxLifetime,
-		ConnMaxLifetimeJitter: opt.ConnMaxLifetimeJitter,
-		ReadBufferSize:        opt.ReadBufferSize,
-		WriteBufferSize:       opt.WriteBufferSize,
+		PoolFIFO:                    opt.PoolFIFO,
+		PoolSize:                    opt.PoolSize,
+		PoolTimeout:                 opt.PoolTimeout,
+		MinIdleConns:                opt.MinIdleConns,
+		MaxIdleConns:                opt.MaxIdleConns,
+		MaxActiveConns:              opt.MaxActiveConns,
+		ConnMaxIdleTime:             opt.ConnMaxIdleTime,
+		ConnMaxLifetime:             opt.ConnMaxLifetime,
+		ConnMaxLifetimeJitter:       opt.ConnMaxLifetimeJitter,
+		ConnMaxLifetimeReapInterval: opt.ConnMaxLifetimeReapInterval,
+		ReadBufferSize:              opt.ReadBufferSize,
+		WriteBufferSize:             opt.WriteBufferSize,
 
 		PipelineReadBufferSize:  opt.PipelineReadBufferSize,
 		PipelineWriteBufferSize: opt.PipelineWriteBufferSize,
@@ -723,10 +725,17 @@ func (c *Ring) PoolStats() *PoolStats {
 		acc.Misses += s.Misses
 		acc.Timeouts += s.Timeouts
 		acc.WaitCount += s.WaitCount
+		acc.Unusable += s.Unusable
 		acc.WaitDurationNs += s.WaitDurationNs
 		acc.TotalConns += s.TotalConns
 		acc.IdleConns += s.IdleConns
 		acc.StaleConns += s.StaleConns
+		acc.PendingRequests += s.PendingRequests
+
+		pub := shard.Client.pubSubPool.Stats()
+		acc.PubSubStats.Created += pub.Created
+		acc.PubSubStats.Untracked += pub.Untracked
+		acc.PubSubStats.Active += pub.Active
 
 		// Each shard now creates the dedicated pipeline pool by default; fold its
 		// stats into acc.PipelineStats so ring monitoring reflects it too.
@@ -736,10 +745,12 @@ func (c *Ring) PoolStats() *PoolStats {
 			pipe.Misses += ps.Misses
 			pipe.Timeouts += ps.Timeouts
 			pipe.WaitCount += ps.WaitCount
+			pipe.Unusable += ps.Unusable
 			pipe.WaitDurationNs += ps.WaitDurationNs
 			pipe.TotalConns += ps.TotalConns
 			pipe.IdleConns += ps.IdleConns
 			pipe.StaleConns += ps.StaleConns
+			pipe.PendingRequests += ps.PendingRequests
 			havePipe = true
 		}
 	}

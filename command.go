@@ -171,6 +171,7 @@ const (
 	CmdTypeAREntrySlice
 	CmdTypeBackupStatus
 	CmdTypeACLUser
+	CmdTypeClusterSlotStats
 )
 
 type (
@@ -944,6 +945,11 @@ func (cmd *Cmd) Uint64() (uint64, error) {
 func toUint64(val interface{}) (uint64, error) {
 	switch val := val.(type) {
 	case int64:
+		if val < 0 {
+			// Give the error ParseUint gives for the same number in a
+			// bulk string, not a wrapped value.
+			return toUint64(strconv.FormatInt(val, 10))
+		}
 		return uint64(val), nil
 	case string:
 		return strconv.ParseUint(val, 10, 64)
@@ -3137,12 +3143,8 @@ func (cmd *XMessageSliceCmd) Clone() Cmder {
 	if cmd.val != nil {
 		val = make([]XMessage, len(cmd.val))
 		for i, msg := range cmd.val {
-			val[i] = XMessage{
-				ID: msg.ID,
-			}
-			if msg.Values != nil {
-				val[i].Values = maps.Clone(msg.Values)
-			}
+			val[i] = msg
+			val[i].Values = maps.Clone(msg.Values)
 		}
 	}
 	return &XMessageSliceCmd{
@@ -3319,15 +3321,8 @@ func (cmd *XStreamSliceCmd) Clone() Cmder {
 			if stream.Messages != nil {
 				val[i].Messages = make([]XMessage, len(stream.Messages))
 				for j, msg := range stream.Messages {
-					val[i].Messages[j] = XMessage{
-						ID: msg.ID,
-					}
-					if msg.Values != nil {
-						val[i].Messages[j].Values = make(map[string]interface{}, len(msg.Values))
-						for k, v := range msg.Values {
-							val[i].Messages[j].Values[k] = v
-						}
-					}
+					val[i].Messages[j] = msg
+					val[i].Messages[j].Values = maps.Clone(msg.Values)
 				}
 			}
 		}
@@ -4244,35 +4239,10 @@ func (cmd *XInfoStreamCmd) readReply(rd *proto.Reader) error {
 func (cmd *XInfoStreamCmd) Clone() Cmder {
 	var val *XInfoStream
 	if cmd.val != nil {
-		val = &XInfoStream{
-			Length:               cmd.val.Length,
-			RadixTreeKeys:        cmd.val.RadixTreeKeys,
-			RadixTreeNodes:       cmd.val.RadixTreeNodes,
-			Groups:               cmd.val.Groups,
-			LastGeneratedID:      cmd.val.LastGeneratedID,
-			MaxDeletedEntryID:    cmd.val.MaxDeletedEntryID,
-			EntriesAdded:         cmd.val.EntriesAdded,
-			RecordedFirstEntryID: cmd.val.RecordedFirstEntryID,
-		}
-		// Clone XMessage fields
-		val.FirstEntry = XMessage{
-			ID: cmd.val.FirstEntry.ID,
-		}
-		if cmd.val.FirstEntry.Values != nil {
-			val.FirstEntry.Values = make(map[string]interface{}, len(cmd.val.FirstEntry.Values))
-			for k, v := range cmd.val.FirstEntry.Values {
-				val.FirstEntry.Values[k] = v
-			}
-		}
-		val.LastEntry = XMessage{
-			ID: cmd.val.LastEntry.ID,
-		}
-		if cmd.val.LastEntry.Values != nil {
-			val.LastEntry.Values = make(map[string]interface{}, len(cmd.val.LastEntry.Values))
-			for k, v := range cmd.val.LastEntry.Values {
-				val.LastEntry.Values[k] = v
-			}
-		}
+		v := *cmd.val
+		v.FirstEntry.Values = maps.Clone(v.FirstEntry.Values)
+		v.LastEntry.Values = maps.Clone(v.LastEntry.Values)
+		val = &v
 	}
 	return &XInfoStreamCmd{
 		baseCmd: cmd.cloneBaseCmd(),
@@ -4681,15 +4651,9 @@ func readXInfoStreamConsumers(rd *proto.Reader) ([]XInfoStreamConsumer, error) {
 func (cmd *XInfoStreamFullCmd) Clone() Cmder {
 	var val *XInfoStreamFull
 	if cmd.val != nil {
-		val = &XInfoStreamFull{
-			Length:               cmd.val.Length,
-			RadixTreeKeys:        cmd.val.RadixTreeKeys,
-			RadixTreeNodes:       cmd.val.RadixTreeNodes,
-			LastGeneratedID:      cmd.val.LastGeneratedID,
-			MaxDeletedEntryID:    cmd.val.MaxDeletedEntryID,
-			EntriesAdded:         cmd.val.EntriesAdded,
-			RecordedFirstEntryID: cmd.val.RecordedFirstEntryID,
-		}
+		// Copy the struct so a field added later is not left out.
+		v := *cmd.val
+		val = &v
 		// Clone Entries
 		if cmd.val.Entries != nil {
 			val.Entries = make([]XMessage, len(cmd.val.Entries))
@@ -4705,10 +4669,21 @@ func (cmd *XInfoStreamFullCmd) Clone() Cmder {
 				}
 			}
 		}
-		// Clone Groups - simplified copy for now due to complexity
+		// Clone Groups
 		if cmd.val.Groups != nil {
 			val.Groups = make([]XInfoStreamGroup, len(cmd.val.Groups))
-			copy(val.Groups, cmd.val.Groups)
+			for i, group := range cmd.val.Groups {
+				group.Pending = slices.Clone(group.Pending)
+				if group.Consumers != nil {
+					consumers := make([]XInfoStreamConsumer, len(group.Consumers))
+					for j, consumer := range group.Consumers {
+						consumer.Pending = slices.Clone(consumer.Pending)
+						consumers[j] = consumer
+					}
+					group.Consumers = consumers
+				}
+				val.Groups[i] = group
+			}
 		}
 	}
 	return &XInfoStreamFullCmd{
@@ -8144,8 +8119,9 @@ func (cmd *FunctionStatsCmd) readRunningScripts(rd *proto.Reader) ([]RunningScri
 func (cmd *FunctionStatsCmd) Clone() Cmder {
 	val := FunctionStats{
 		isRunning: cmd.val.isRunning,
-		rs:        cmd.val.rs, // RunningScript is a simple struct, can be copied directly
+		rs:        cmd.val.rs,
 	}
+	val.rs.Command = slices.Clone(cmd.val.rs.Command)
 	if cmd.val.Engines != nil {
 		val.Engines = make([]Engine, len(cmd.val.Engines))
 		copy(val.Engines, cmd.val.Engines)
@@ -8578,6 +8554,119 @@ func (cmd *ClusterLinksCmd) Clone() Cmder {
 	return &ClusterLinksCmd{
 		baseCmd: cmd.cloneBaseCmd(),
 		val:     val,
+	}
+}
+
+// ------------------------------------------------------------------------------------------------------------------
+
+// ClusterSlotStat is the usage of one slot, as reported by CLUSTER SLOT-STATS.
+// Without cluster-slot-stats-enabled the server reports KeyCount only.
+type ClusterSlotStat struct {
+	Slot            int64
+	KeyCount        int64
+	MemoryBytes     int64
+	CPUUsec         int64
+	NetworkBytesIn  int64
+	NetworkBytesOut int64
+}
+
+type ClusterSlotStatsCmd struct {
+	baseCmd
+
+	val []ClusterSlotStat
+}
+
+var _ Cmder = (*ClusterSlotStatsCmd)(nil)
+
+func NewClusterSlotStatsCmd(ctx context.Context, args ...interface{}) *ClusterSlotStatsCmd {
+	return &ClusterSlotStatsCmd{
+		baseCmd: baseCmd{
+			ctx:     ctx,
+			args:    args,
+			cmdType: CmdTypeClusterSlotStats,
+		},
+	}
+}
+
+func (cmd *ClusterSlotStatsCmd) SetVal(val []ClusterSlotStat) {
+	cmd.val = val
+}
+
+func (cmd *ClusterSlotStatsCmd) Val() []ClusterSlotStat {
+	cmd.await()
+	return cmd.val
+}
+
+func (cmd *ClusterSlotStatsCmd) Result() ([]ClusterSlotStat, error) {
+	cmd.await()
+	return cmd.val, cmd.err
+}
+
+func (cmd *ClusterSlotStatsCmd) String() string {
+	cmd.await()
+	return cmdString(cmd, cmd.val)
+}
+
+func (cmd *ClusterSlotStatsCmd) readReply(rd *proto.Reader) error {
+	n, err := rd.ReadArrayLen()
+	if err != nil {
+		return err
+	}
+	cmd.val = make([]ClusterSlotStat, n)
+
+	for i := range cmd.val {
+		stat := &cmd.val[i]
+		if err := rd.ReadFixedArrayLen(2); err != nil {
+			return err
+		}
+		if stat.Slot, err = rd.ReadInt(); err != nil {
+			return err
+		}
+		// A map in RESP3, a flat array in RESP2.
+		m, err := rd.ReadMapLen()
+		if err != nil {
+			return err
+		}
+		for j := 0; j < m; j++ {
+			key, err := rd.ReadString()
+			if err != nil {
+				return err
+			}
+			if field := stat.metric(key); field != nil {
+				*field, err = rd.ReadInt()
+			} else {
+				err = rd.DiscardNext()
+			}
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
+// metric returns the field that holds the named metric, or nil.
+func (s *ClusterSlotStat) metric(name string) *int64 {
+	switch name {
+	case "key-count":
+		return &s.KeyCount
+	case "memory-bytes":
+		return &s.MemoryBytes
+	case "cpu-usec":
+		return &s.CPUUsec
+	case "network-bytes-in":
+		return &s.NetworkBytesIn
+	case "network-bytes-out":
+		return &s.NetworkBytesOut
+	}
+	return nil
+}
+
+func (cmd *ClusterSlotStatsCmd) Clone() Cmder {
+	return &ClusterSlotStatsCmd{
+		baseCmd: cmd.cloneBaseCmd(),
+		val:     slices.Clone(cmd.val),
 	}
 }
 
@@ -9172,6 +9261,9 @@ func (cmd *ClientInfoCmd) Clone() Cmder {
 			OutputListLength:   cmd.val.OutputListLength,
 			OutputMemory:       cmd.val.OutputMemory,
 			TotalMemory:        cmd.val.TotalMemory,
+			TotalNetIn:         cmd.val.TotalNetIn,
+			TotalNetOut:        cmd.val.TotalNetOut,
+			TotalCmds:          cmd.val.TotalCmds,
 			IoThread:           cmd.val.IoThread,
 			Events:             cmd.val.Events,
 			LastCmd:            cmd.val.LastCmd,
@@ -9326,43 +9418,9 @@ func (cmd *ACLLogCmd) Clone() Cmder {
 				}
 				// Clone ClientInfo if present
 				if entry.ClientInfo != nil {
-					val[i].ClientInfo = &ClientInfo{
-						ID:                 entry.ClientInfo.ID,
-						Addr:               entry.ClientInfo.Addr,
-						LAddr:              entry.ClientInfo.LAddr,
-						FD:                 entry.ClientInfo.FD,
-						Name:               entry.ClientInfo.Name,
-						Age:                entry.ClientInfo.Age,
-						Idle:               entry.ClientInfo.Idle,
-						Flags:              entry.ClientInfo.Flags,
-						DB:                 entry.ClientInfo.DB,
-						Sub:                entry.ClientInfo.Sub,
-						PSub:               entry.ClientInfo.PSub,
-						SSub:               entry.ClientInfo.SSub,
-						Multi:              entry.ClientInfo.Multi,
-						Watch:              entry.ClientInfo.Watch,
-						QueryBuf:           entry.ClientInfo.QueryBuf,
-						QueryBufFree:       entry.ClientInfo.QueryBufFree,
-						ArgvMem:            entry.ClientInfo.ArgvMem,
-						MultiMem:           entry.ClientInfo.MultiMem,
-						BufferSize:         entry.ClientInfo.BufferSize,
-						BufferPeak:         entry.ClientInfo.BufferPeak,
-						OutputBufferLength: entry.ClientInfo.OutputBufferLength,
-						OutputListLength:   entry.ClientInfo.OutputListLength,
-						OutputMemory:       entry.ClientInfo.OutputMemory,
-						TotalMemory:        entry.ClientInfo.TotalMemory,
-						IoThread:           entry.ClientInfo.IoThread,
-						Events:             entry.ClientInfo.Events,
-						LastCmd:            entry.ClientInfo.LastCmd,
-						User:               entry.ClientInfo.User,
-						Redir:              entry.ClientInfo.Redir,
-						Resp:               entry.ClientInfo.Resp,
-						LibName:            entry.ClientInfo.LibName,
-						LibVer:             entry.ClientInfo.LibVer,
-						ReadEvents:         entry.ClientInfo.ReadEvents,
-						AvgPipelineLenSum:  entry.ClientInfo.AvgPipelineLenSum,
-						AvgPipelineLenCnt:  entry.ClientInfo.AvgPipelineLenCnt,
-					}
+					// Copy the struct so a field added later is not left out.
+					ci := *entry.ClientInfo
+					val[i].ClientInfo = &ci
 				}
 			}
 		}
@@ -9817,7 +9875,7 @@ func (cmd *VectorScoreSliceCmd) readReply(rd *proto.Reader) error {
 func (cmd *VectorScoreSliceCmd) Clone() Cmder {
 	return &VectorScoreSliceCmd{
 		baseCmd: cmd.cloneBaseCmd(),
-		val:     cmd.val,
+		val:     slices.Clone(cmd.val),
 	}
 }
 
@@ -10038,9 +10096,16 @@ func (cmd *VectorAttribSliceCmd) readReply(rd *proto.Reader) error {
 }
 
 func (cmd *VectorAttribSliceCmd) Clone() Cmder {
+	val := slices.Clone(cmd.val)
+	for i := range val {
+		if val[i].Attribs != nil {
+			attribs := *val[i].Attribs
+			val[i].Attribs = &attribs
+		}
+	}
 	return &VectorAttribSliceCmd{
 		baseCmd: cmd.cloneBaseCmd(),
-		val:     cmd.val,
+		val:     val,
 	}
 }
 
@@ -10140,9 +10205,16 @@ func (cmd *VectorScoreAttribSliceCmd) readReply(rd *proto.Reader) error {
 }
 
 func (cmd *VectorScoreAttribSliceCmd) Clone() Cmder {
+	val := slices.Clone(cmd.val)
+	for i := range val {
+		if val[i].Attribs != nil {
+			attribs := *val[i].Attribs
+			val[i].Attribs = &attribs
+		}
+	}
 	return &VectorScoreAttribSliceCmd{
 		baseCmd: cmd.cloneBaseCmd(),
-		val:     cmd.val,
+		val:     val,
 	}
 }
 
@@ -10452,6 +10524,13 @@ func ExtractCommandValue(cmd interface{}) (interface{}, error) {
 				Err() error
 			}); ok {
 				return clusterLinksCmd.Val(), clusterLinksCmd.Err()
+			}
+		case CmdTypeClusterSlotStats:
+			if clusterSlotStatsCmd, ok := cmd.(interface {
+				Val() []ClusterSlotStat
+				Err() error
+			}); ok {
+				return clusterSlotStatsCmd.Val(), clusterSlotStatsCmd.Err()
 			}
 		case CmdTypeClusterShards:
 			if clusterShardsCmd, ok := cmd.(interface {

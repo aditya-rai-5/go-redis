@@ -2198,8 +2198,6 @@ func classifyCommandError(err error) (errorType, statusCode string, isInternal b
 		return ErrorTypeNil, ErrorTypeNil, false
 	}
 
-	errStr := err.Error()
-
 	// Check for timeout errors
 	if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 		return "TIMEOUT", "TIMEOUT", true
@@ -2220,7 +2218,10 @@ func classifyCommandError(err error) (errorType, statusCode string, isInternal b
 
 	// Check for Redis errors
 	// Examples: "ERR ...", "WRONGTYPE ...", "CLUSTERDOWN ..."
-	if len(errStr) > 0 {
+	// Only a server reply has a prefix: io.EOF reads "EOF" but is not one.
+	var redisErr Error
+	if errors.As(err, &redisErr) {
+		errStr := redisErr.Error()
 		// Find the first space to extract the prefix
 		spaceIdx := 0
 		for i, c := range errStr {
@@ -2625,9 +2626,6 @@ func (c *baseClient) closeResources() error {
 		firstErr = err
 	}
 
-	// Unregister pools from OTel before closing them
-	otel.UnregisterPools(c.recorder(), c.connPool, c.pubSubPool, c.getPipelinePool())
-
 	if c.connPool != nil {
 		if err := c.connPool.Close(); err != nil && firstErr == nil {
 			firstErr = err
@@ -2638,11 +2636,15 @@ func (c *baseClient) closeResources() error {
 			firstErr = err
 		}
 	}
+	var pubSubPool otel.PubSubPooler
 	if c.pubSubPool != nil {
 		if err := c.pubSubPool.Close(); err != nil && firstErr == nil {
 			firstErr = err
 		}
+		pubSubPool = c.pubSubPool
 	}
+	// After closing, so a recorder installed meanwhile is not handed a closing pool.
+	otel.UnregisterPools(c.recorder(), c.connPool, pubSubPool, c.getPipelinePool())
 	return firstErr
 }
 
@@ -3279,12 +3281,8 @@ func NewClient(opt *Options) *Client {
 
 	c.initStreamingCredentials()
 
-	// Create metadata independently of CSC. The zero config reuses the package
-	// default without allocating a store.
+	// Cluster node clients share their parent's metadata without owning a store.
 	c.baseClient.metadataSource = opt.cscMetadataSource
-	if c.baseClient.metadataSource == nil {
-		c.baseClient.cmdMeta = newCommandMetadataStore(opt.CommandMetadata, c.fetchCommandMetadata)
-	}
 
 	// CSC wiring (SharedTracking): shared cache + per-connection CLIENT TRACKING +
 	// background drainer. attachCSC is the strategy dispatch entry.
@@ -3344,7 +3342,7 @@ func NewClient(opt *Options) *Client {
 
 	// Register pools with OTel recorder if it supports pool registration
 	// This allows async gauge metrics to pull stats from pools periodically
-	otel.RegisterPools(c.recorder(), c.connPool, c.pubSubPool, c.getPipelinePool(), opt.Addr)
+	otel.RegisterPools(c.recorder(), c.connPool, c.pubSubPool, c.getPipelinePool())
 
 	built = true
 	return &c

@@ -529,7 +529,7 @@ type FTHybridVectorExpression struct {
 type FTHybridCombineOptions struct {
 	Method       FTHybridCombineMethod
 	Count        int
-	Window       int     // For RRF
+	Window       int     // For RRF and LINEAR
 	Constant     float64 // For RRF
 	Alpha        float64 // For LINEAR
 	Beta         float64 // For LINEAR
@@ -2090,6 +2090,11 @@ func parseFTInfo(data map[string]interface{}) (FTInfoResult, error) {
 						att.PhoneticMatcher = internal.ToString(attrSlice[i+1])
 						continue
 					}
+					if internal.ToLower(internal.ToString(attrSlice[i])) == "separator" && i+1 < attrLen {
+						// Skip the value: the separator "m" is not the HNSW M key.
+						i++
+						continue
+					}
 					if internal.ToLower(internal.ToString(attrSlice[i])) == "casesensitive" {
 						att.CaseSensitive = true
 						continue
@@ -2812,6 +2817,11 @@ func parseFTSearch(data []interface{}, noContent, withScores, withPayloads, with
 				if !ok {
 					return FTSearchResult{}, fmt.Errorf("invalid field key format")
 				}
+				if fields[j+1] == nil {
+					// A JSON null has no string value. RESP3 leaves the
+					// field out too.
+					continue
+				}
 				value, ok := fields[j+1].(string)
 				if !ok {
 					return FTSearchResult{}, fmt.Errorf("invalid field value format")
@@ -3038,6 +3048,7 @@ func (cmd *FTSearchCmd) Clone() Cmder {
 				Score:   doc.Score,
 				Payload: doc.Payload,
 				SortKey: doc.SortKey,
+				Error:   doc.Error,
 			}
 			if doc.Fields != nil {
 				val.Docs[i].Fields = make(map[string]string, len(doc.Fields))
@@ -4127,6 +4138,9 @@ func (c cmdable) FTHybridWithArgs(ctx context.Context, index string, options *FT
 				// weight is sent when the other one is set.
 				if options.Combine.Alpha > 0 || options.Combine.Beta > 0 {
 					combineParams = append(combineParams, "ALPHA", options.Combine.Alpha, "BETA", options.Combine.Beta)
+				}
+				if options.Combine.Window > 0 {
+					combineParams = append(combineParams, "WINDOW", options.Combine.Window)
 				}
 			}
 

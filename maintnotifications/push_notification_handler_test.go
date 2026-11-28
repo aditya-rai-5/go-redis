@@ -261,6 +261,18 @@ func TestHandleMoving_NullEndpointLeavesPubSubMarkedNotQueued(t *testing.T) {
 		}
 		assertPubSubMarkedNotQueued(t, cn, manager, hook)
 	})
+	t.Run("timeS=1 keeps the timeS/2 delay", func(t *testing.T) {
+		cn, manager, hook := setupNullMovingPubSub(t, 1)
+		time.Sleep(200 * time.Millisecond)
+		if cn.ShouldHandoff() {
+			t.Fatal("PubSub conn marked before timeS/2")
+		}
+		deadline := time.Now().Add(3 * time.Second)
+		for !cn.ShouldHandoff() && time.Now().Before(deadline) {
+			time.Sleep(20 * time.Millisecond)
+		}
+		assertPubSubMarkedNotQueued(t, cn, manager, hook)
+	})
 }
 
 func setupNullMovingPubSub(t *testing.T, timeS int64) (*pool.Conn, *Manager, *PoolHook) {
@@ -319,5 +331,43 @@ func assertPubSubMarkedNotQueued(t *testing.T, cn *pool.Conn, manager *Manager, 
 	}
 	if hook.IsHandoffPending(cn) {
 		t.Fatal("PubSub null-endpoint MOVING must not queue the handoff worker")
+	}
+}
+
+// TestRelaxingNotificationsRecordRelaxedTimeoutMetric tests that every
+// notification that relaxes the connection timeout records the metric.
+func TestRelaxingNotificationsRecordRelaxedTimeoutMetric(t *testing.T) {
+	var recorded []string
+	pool.SetAllMetricCallbacks(&pool.MetricCallbacks{
+		ConnectionRelaxedTimeout: func(_ context.Context, delta int, _ *pool.Conn, _, notificationType string) {
+			if delta == 1 {
+				recorded = append(recorded, notificationType)
+			}
+		},
+	})
+	defer pool.SetAllMetricCallbacks(nil)
+
+	handler := &NotificationHandler{manager: createTestManager("127.0.0.1:6379")}
+
+	notifications := [][]interface{}{
+		{"MIGRATING", int64(1), int64(5)},
+		{"FAILING_OVER", int64(2), int64(5)},
+		{"SMIGRATING", int64(3), "1000-2000"},
+	}
+	for _, notification := range notifications {
+		name := notification[0].(string)
+		recorded = nil
+		conn := pool.NewConn(&mockNetConn{addr: "test:6379"})
+		handlerCtx := push.NotificationHandlerContext{Conn: conn}
+
+		if err := handler.HandlePushNotification(context.Background(), handlerCtx, notification); err != nil {
+			t.Fatalf("%s: unexpected error: %v", name, err)
+		}
+		if !conn.HasRelaxedTimeout() {
+			t.Fatalf("%s: expected relaxed timeout to be applied", name)
+		}
+		if len(recorded) != 1 || recorded[0] != name {
+			t.Errorf("%s: expected one relaxed timeout metric for %q, got %v", name, name, recorded)
+		}
 	}
 }
